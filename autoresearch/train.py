@@ -182,6 +182,15 @@ def clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
+def average_rank_scores(probability_stack: np.ndarray) -> np.ndarray:
+    rank_stack = np.empty_like(probability_stack)
+    denominator = max(1, probability_stack.shape[1] - 1)
+    for model_index, probabilities in enumerate(probability_stack):
+        order = np.argsort(probabilities)
+        rank_stack[model_index, order] = np.arange(len(probabilities), dtype=np.float64) / denominator
+    return rank_stack.mean(axis=0)
+
+
 def run_experiment() -> dict[str, float]:
     config = TrainConfig()
     set_seed(DEFAULT_SEED)
@@ -230,7 +239,7 @@ def run_experiment() -> dict[str, float]:
         labels, probabilities, _ = predict_probabilities(model, valid_loader, loss_function, device)
         validation_labels = labels
         ensemble_probabilities.append(probabilities)
-        averaged_probabilities = np.mean(np.stack(ensemble_probabilities, axis=0), axis=0)
+        averaged_probabilities = average_rank_scores(np.stack(ensemble_probabilities, axis=0))
         metrics = classification_metrics(labels, averaged_probabilities)
         clipped_probabilities = np.clip(averaged_probabilities, 1e-7, 1.0 - 1e-7)
         metrics["valid_loss"] = float(
