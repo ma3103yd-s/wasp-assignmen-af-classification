@@ -1,0 +1,185 @@
+"""Main editable experiment file for AutoResearch-style ECG runs."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+from prepare import DEFAULT_SEED, classification_metrics, load_prepared_task, primary_metric
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    batch_size: int = 32
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    num_epochs: int = 15
+    max_train_seconds: float = 300.0
+    model_path: Path = Path("autoresearch/model.pth")
+
+
+class ECGConvNet(nn.Module):
+    def __init__(self, n_leads: int = 8):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(n_leads, 32, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(p=0.2),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, traces: torch.Tensor) -> torch.Tensor:
+        traces = traces.transpose(1, 2)
+        return self.classifier(self.features(traces))
+
+
+def set_seed(seed: int = DEFAULT_SEED) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def make_loaders(config: TrainConfig):
+    prepared = load_prepared_task(seed=DEFAULT_SEED)
+    traces = torch.tensor(prepared.traces, dtype=torch.float32)
+    labels = torch.tensor(prepared.labels, dtype=torch.float32).reshape(-1, 1)
+
+    train_dataset = TensorDataset(traces[prepared.split.train], labels[prepared.split.train])
+    valid_dataset = TensorDataset(traces[prepared.split.valid], labels[prepared.split.valid])
+    generator = torch.Generator().manual_seed(DEFAULT_SEED)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        generator=generator,
+    )
+    valid_loader = DataLoader(valid_dataset, batch_size=config.batch_size, shuffle=False)
+    return train_loader, valid_loader, prepared.traces.shape[-1]
+
+
+def train_epoch(model, dataloader, optimizer, loss_function, device) -> float:
+    model.train()
+    total_loss = 0.0
+    n_entries = 0
+    for traces, labels in dataloader:
+        traces = traces.to(device)
+        labels = labels.to(device)
+
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(traces)
+        loss = loss_function(logits, labels)
+        loss.backward()
+        optimizer.step()
+
+        batch_size = len(traces)
+        total_loss += float(loss.detach().cpu()) * batch_size
+        n_entries += batch_size
+    return total_loss / max(1, n_entries)
+
+
+def evaluate_model(model, dataloader, loss_function, device):
+    model.eval()
+    total_loss = 0.0
+    n_entries = 0
+    all_probabilities = []
+    all_labels = []
+    with torch.no_grad():
+        for traces, labels in dataloader:
+            traces = traces.to(device)
+            labels = labels.to(device)
+            logits = model(traces)
+            loss = loss_function(logits, labels)
+
+            batch_size = len(traces)
+            total_loss += float(loss.detach().cpu()) * batch_size
+            n_entries += batch_size
+            all_probabilities.append(torch.sigmoid(logits).detach().cpu().numpy())
+            all_labels.append(labels.detach().cpu().numpy())
+
+    probabilities = np.concatenate(all_probabilities).reshape(-1)
+    labels = np.concatenate(all_labels).reshape(-1)
+    metrics = classification_metrics(labels, probabilities)
+    metrics["valid_loss"] = total_loss / max(1, n_entries)
+    return metrics
+
+
+def run_experiment() -> dict[str, float]:
+    config = TrainConfig()
+    set_seed(DEFAULT_SEED)
+    start_total = time.monotonic()
+    train_loader, valid_loader, n_leads = make_loaders(config)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = ECGConvNet(n_leads=n_leads).to(device)
+    loss_function = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+
+    best_metrics = None
+    training_start = time.monotonic()
+    for epoch in range(1, config.num_epochs + 1):
+        elapsed = time.monotonic() - training_start
+        if elapsed >= config.max_train_seconds:
+            break
+
+        train_loss = train_epoch(model, train_loader, optimizer, loss_function, device)
+        metrics = evaluate_model(model, valid_loader, loss_function, device)
+        metrics["train_loss"] = train_loss
+        metrics["epoch"] = float(epoch)
+
+        if best_metrics is None or primary_metric(metrics) > primary_metric(best_metrics):
+            config.model_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"model": model.state_dict()}, config.model_path)
+            best_metrics = metrics
+
+    if best_metrics is None:
+        raise RuntimeError("No training epoch completed within the fixed budget.")
+
+    best_metrics["training_seconds"] = time.monotonic() - training_start
+    best_metrics["total_seconds"] = time.monotonic() - start_total
+    best_metrics["primary_metric"] = primary_metric(best_metrics)
+    best_metrics["peak_resource"] = 1.0 if device.type == "cuda" else 0.0
+    return best_metrics
+
+
+def print_summary(metrics: dict[str, float]) -> None:
+    print("---")
+    for key in (
+        "primary_metric",
+        "best_f1",
+        "best_threshold",
+        "f1_at_0_5",
+        "auroc",
+        "average_precision",
+        "accuracy",
+        "valid_loss",
+        "train_loss",
+        "epoch",
+        "training_seconds",
+        "total_seconds",
+        "peak_resource",
+    ):
+        print(f"{key}: {metrics[key]:.6f}")
+
+
+if __name__ == "__main__":
+    print_summary(run_experiment())

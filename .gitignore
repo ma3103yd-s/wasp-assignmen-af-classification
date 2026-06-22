@@ -1,3 +1,8 @@
 codesubset/
 ecg-preprocessing/
 codesubset.tar.gz
+__pycache__/
+*.pyc
+autoresearch/model.pth
+autoresearch/results.tsv
+autoresearch/run.log
