@@ -176,7 +176,7 @@ def run_experiment() -> dict[str, float]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ECGConvNet(n_leads=n_leads).to(device)
     loss_function = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
