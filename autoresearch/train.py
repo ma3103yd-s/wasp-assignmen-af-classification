@@ -19,6 +19,7 @@ class TrainConfig:
     batch_size: int = 64
     learning_rate: float = 2e-3
     weight_decay: float = 2e-4
+    ensemble_seeds: tuple[int, ...] = (42, 123, 777)
     num_epochs: int = 15
     max_train_seconds: float = 300.0
     model_path: Path = Path("autoresearch/model.pth")
@@ -141,7 +142,7 @@ def train_epoch(model, dataloader, optimizer, loss_function, device) -> float:
     return total_loss / max(1, n_entries)
 
 
-def evaluate_model(model, dataloader, loss_function, device):
+def predict_probabilities(model, dataloader, loss_function, device):
     model.eval()
     total_loss = 0.0
     n_entries = 0
@@ -162,9 +163,23 @@ def evaluate_model(model, dataloader, loss_function, device):
 
     probabilities = np.concatenate(all_probabilities).reshape(-1)
     labels = np.concatenate(all_labels).reshape(-1)
+    return labels, probabilities, total_loss / max(1, n_entries)
+
+
+def evaluate_model(model, dataloader, loss_function, device):
+    labels, probabilities, valid_loss = predict_probabilities(
+        model,
+        dataloader,
+        loss_function,
+        device,
+    )
     metrics = classification_metrics(labels, probabilities)
-    metrics["valid_loss"] = total_loss / max(1, n_entries)
+    metrics["valid_loss"] = valid_loss
     return metrics
+
+
+def clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
 def run_experiment() -> dict[str, float]:
@@ -174,32 +189,65 @@ def run_experiment() -> dict[str, float]:
     train_loader, valid_loader, n_leads = make_loaders(config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ECGConvNet(n_leads=n_leads).to(device)
     loss_function = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
 
     best_metrics = None
+    ensemble_probabilities = []
+    validation_labels = None
     training_start = time.monotonic()
-    for epoch in range(1, config.num_epochs + 1):
-        elapsed = time.monotonic() - training_start
-        if elapsed >= config.max_train_seconds:
+    for model_index, seed in enumerate(config.ensemble_seeds, start=1):
+        if time.monotonic() - training_start >= config.max_train_seconds:
             break
 
-        train_loss = train_epoch(model, train_loader, optimizer, loss_function, device)
-        metrics = evaluate_model(model, valid_loader, loss_function, device)
-        metrics["train_loss"] = train_loss
-        metrics["epoch"] = float(epoch)
+        set_seed(seed)
+        model = ECGConvNet(n_leads=n_leads).to(device)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+
+        model_best_metrics = None
+        model_best_state = None
+        for epoch in range(1, config.num_epochs + 1):
+            elapsed = time.monotonic() - training_start
+            if elapsed >= config.max_train_seconds:
+                break
+
+            train_loss = train_epoch(model, train_loader, optimizer, loss_function, device)
+            metrics = evaluate_model(model, valid_loader, loss_function, device)
+            metrics["train_loss"] = train_loss
+            metrics["epoch"] = float(epoch)
+
+            if model_best_metrics is None or primary_metric(metrics) > primary_metric(model_best_metrics):
+                model_best_metrics = metrics
+                model_best_state = clone_state_dict(model)
+
+        if model_best_metrics is None or model_best_state is None:
+            break
+
+        model.load_state_dict(model_best_state)
+        labels, probabilities, _ = predict_probabilities(model, valid_loader, loss_function, device)
+        validation_labels = labels
+        ensemble_probabilities.append(probabilities)
+        averaged_probabilities = np.mean(np.stack(ensemble_probabilities, axis=0), axis=0)
+        metrics = classification_metrics(labels, averaged_probabilities)
+        clipped_probabilities = np.clip(averaged_probabilities, 1e-7, 1.0 - 1e-7)
+        metrics["valid_loss"] = float(
+            -np.mean(
+                (labels * np.log(clipped_probabilities))
+                + ((1.0 - labels) * np.log(1.0 - clipped_probabilities))
+            )
+        )
+        metrics["train_loss"] = model_best_metrics["train_loss"]
+        metrics["epoch"] = float(model_index)
 
         if best_metrics is None or primary_metric(metrics) > primary_metric(best_metrics):
             config.model_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"model": model.state_dict()}, config.model_path)
             best_metrics = metrics
 
-    if best_metrics is None:
+    if best_metrics is None or validation_labels is None:
         raise RuntimeError("No training epoch completed within the fixed budget.")
 
     best_metrics["training_seconds"] = time.monotonic() - training_start
