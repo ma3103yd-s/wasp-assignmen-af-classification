@@ -36,7 +36,7 @@ class ResidualBlock(nn.Module):
                 padding=3,
                 bias=False,
             ),
-            nn.BatchNorm1d(out_channels),
+            nn.GroupNorm(8, out_channels),
             nn.SiLU(),
             nn.Conv1d(
                 out_channels,
@@ -45,12 +45,12 @@ class ResidualBlock(nn.Module):
                 padding=2,
                 bias=False,
             ),
-            nn.BatchNorm1d(out_channels),
+            nn.GroupNorm(8, out_channels),
         )
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm1d(out_channels),
+                nn.GroupNorm(8, out_channels),
             )
         else:
             self.shortcut = nn.Identity()
@@ -65,7 +65,7 @@ class ECGConvNet(nn.Module):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv1d(n_leads, 32, kernel_size=15, stride=2, padding=7, bias=False),
-            nn.BatchNorm1d(32),
+            nn.GroupNorm(8, 32),
             nn.SiLU(),
             nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
         )
