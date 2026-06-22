@@ -19,7 +19,7 @@ class TrainConfig:
     batch_size: int = 64
     learning_rate: float = 2e-3
     weight_decay: float = 2e-4
-    ensemble_seeds: tuple[int, ...] = (42, 123, 777)
+    ensemble_seeds: tuple[int, ...] = (42, 123, 2024)
     num_epochs: int = 15
     max_train_seconds: float = 300.0
     model_path: Path = Path("autoresearch/model.pth")
