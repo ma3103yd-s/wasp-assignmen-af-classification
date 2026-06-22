@@ -18,7 +18,7 @@ from prepare import DEFAULT_SEED, classification_metrics, load_prepared_task, pr
 class TrainConfig:
     batch_size: int = 64
     learning_rate: float = 2e-3
-    weight_decay: float = 1e-3
+    weight_decay: float = 5e-4
     num_epochs: int = 15
     max_train_seconds: float = 300.0
     model_path: Path = Path("autoresearch/model.pth")
