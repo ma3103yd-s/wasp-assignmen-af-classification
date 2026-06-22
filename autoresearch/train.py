@@ -16,36 +16,84 @@ from prepare import DEFAULT_SEED, classification_metrics, load_prepared_task, pr
 
 @dataclass(frozen=True)
 class TrainConfig:
-    batch_size: int = 32
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-4
+    batch_size: int = 64
+    learning_rate: float = 2e-3
+    weight_decay: float = 1e-3
     num_epochs: int = 15
     max_train_seconds: float = 300.0
     model_path: Path = Path("autoresearch/model.pth")
 
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(
+                in_channels,
+                out_channels,
+                kernel_size=7,
+                stride=stride,
+                padding=3,
+                bias=False,
+            ),
+            nn.BatchNorm1d(out_channels),
+            nn.SiLU(),
+            nn.Conv1d(
+                out_channels,
+                out_channels,
+                kernel_size=5,
+                padding=2,
+                bias=False,
+            ),
+            nn.BatchNorm1d(out_channels),
+        )
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels),
+            )
+        else:
+            self.shortcut = nn.Identity()
+        self.activation = nn.SiLU()
+
+    def forward(self, traces: torch.Tensor) -> torch.Tensor:
+        return self.activation(self.net(traces) + self.shortcut(traces))
+
+
 class ECGConvNet(nn.Module):
     def __init__(self, n_leads: int = 8):
         super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv1d(n_leads, 32, kernel_size=7, stride=2, padding=3, bias=False),
+        self.stem = nn.Sequential(
+            nn.Conv1d(n_leads, 32, kernel_size=15, stride=2, padding=7, bias=False),
             nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=4, stride=4),
-            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
+            nn.SiLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
+        )
+        self.features = nn.Sequential(
+            ResidualBlock(32, 32),
+            ResidualBlock(32, 64, stride=2),
+            ResidualBlock(64, 64),
+            ResidualBlock(64, 128, stride=2),
+            ResidualBlock(128, 128),
+            ResidualBlock(128, 192, stride=2),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(p=0.2),
-            nn.Linear(64, 1),
+            nn.Dropout(p=0.3),
+            nn.Linear(384, 1),
         )
 
     def forward(self, traces: torch.Tensor) -> torch.Tensor:
         traces = traces.transpose(1, 2)
-        return self.classifier(self.features(traces))
+        features = self.features(self.stem(traces))
+        pooled = torch.cat(
+            (
+                nn.functional.adaptive_avg_pool1d(features, 1),
+                nn.functional.adaptive_max_pool1d(features, 1),
+            ),
+            dim=1,
+        )
+        return self.classifier(pooled)
 
 
 def set_seed(seed: int = DEFAULT_SEED) -> None:
