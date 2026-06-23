@@ -77,7 +77,7 @@ class InceptionBlock(nn.Module):
         if in_channels > bottleneck_channels:
             self.bottleneck = nn.Sequential(
                 nn.Conv1d(in_channels, bottleneck_channels, kernel_size=1, bias=False),
-                nn.GroupNorm(8, bottleneck_channels),
+                nn.BatchNorm1d(bottleneck_channels),
                 nn.SiLU(),
             )
             conv_channels = bottleneck_channels
@@ -97,7 +97,7 @@ class InceptionBlock(nn.Module):
             nn.Conv1d(in_channels, branch_channels, kernel_size=1, bias=False),
         )
         out_channels = branch_channels * 4
-        self.norm = nn.GroupNorm(8, out_channels)
+        self.norm = nn.BatchNorm1d(out_channels)
         self.shortcut = (
             nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
             if in_channels != out_channels
@@ -118,7 +118,7 @@ class ECGConvNet(nn.Module):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv1d(n_leads, 32, kernel_size=15, stride=2, padding=7, bias=False),
-            nn.GroupNorm(8, 32),
+            nn.BatchNorm1d(32),
             nn.SiLU(),
             nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
         )
