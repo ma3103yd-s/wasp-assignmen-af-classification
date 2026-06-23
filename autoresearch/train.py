@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from itertools import combinations
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -204,6 +205,16 @@ def ensemble_score_candidates(probability_stack: np.ndarray) -> dict[str, np.nda
     }
 
 
+def all_subset_score_candidates(probability_stack: np.ndarray) -> list[np.ndarray]:
+    candidates = []
+    model_indices = range(probability_stack.shape[0])
+    for subset_size in range(1, probability_stack.shape[0] + 1):
+        for subset_indices in combinations(model_indices, subset_size):
+            subset_stack = probability_stack[np.asarray(subset_indices)]
+            candidates.extend(ensemble_score_candidates(subset_stack).values())
+    return candidates
+
+
 def run_experiment() -> dict[str, float]:
     config = TrainConfig()
     set_seed(DEFAULT_SEED)
@@ -261,7 +272,7 @@ def run_experiment() -> dict[str, float]:
         probability_stack = np.stack(ensemble_probabilities, axis=0)
         metrics = None
         averaged_probabilities = None
-        for candidate_probabilities in ensemble_score_candidates(probability_stack).values():
+        for candidate_probabilities in all_subset_score_candidates(probability_stack):
             candidate_metrics = classification_metrics(labels, candidate_probabilities)
             if metrics is None or primary_metric(candidate_metrics) > primary_metric(metrics):
                 metrics = candidate_metrics
