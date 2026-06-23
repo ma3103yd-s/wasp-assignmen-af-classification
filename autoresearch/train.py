@@ -135,7 +135,7 @@ def make_loaders(config: TrainConfig):
     train_labels = prepared.labels[train_indices]
     n_positive = float(train_labels.sum())
     n_negative = float(len(train_labels) - n_positive)
-    pos_weight = n_negative / max(1.0, n_positive)
+    pos_weight = (n_negative / max(1.0, n_positive)) ** 0.5
     return train_loader, valid_loader, prepared.traces.shape[-1], pos_weight
 
 
