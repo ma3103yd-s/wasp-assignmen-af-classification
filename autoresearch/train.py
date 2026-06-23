@@ -242,7 +242,24 @@ def train_epoch(model, dataloader, optimizer, loss_function, device) -> float:
     return total_loss / max(1, n_entries)
 
 
-def predict_probabilities(model, dataloader, loss_function, device):
+def shift_traces(traces: torch.Tensor, offset: int) -> torch.Tensor:
+    if offset == 0:
+        return traces
+    shifted = torch.zeros_like(traces)
+    if offset > 0:
+        shifted[:, offset:] = traces[:, :-offset]
+    else:
+        shifted[:, :offset] = traces[:, -offset:]
+    return shifted
+
+
+def predict_probabilities(
+    model,
+    dataloader,
+    loss_function,
+    device,
+    tta_offsets: tuple[int, ...] = (0,),
+):
     model.eval()
     total_loss = 0.0
     n_entries = 0
@@ -254,11 +271,17 @@ def predict_probabilities(model, dataloader, loss_function, device):
             labels = labels.to(device)
             logits = model(traces)
             loss = loss_function(logits, labels)
+            probabilities = [torch.sigmoid(logits)]
+            for offset in tta_offsets:
+                if offset != 0:
+                    probabilities.append(torch.sigmoid(model(shift_traces(traces, offset))))
 
             batch_size = len(traces)
             total_loss += float(loss.detach().cpu()) * batch_size
             n_entries += batch_size
-            all_probabilities.append(torch.sigmoid(logits).detach().cpu().numpy())
+            all_probabilities.append(
+                torch.stack(probabilities, dim=0).mean(dim=0).detach().cpu().numpy()
+            )
             all_labels.append(labels.detach().cpu().numpy())
 
     probabilities = np.concatenate(all_probabilities).reshape(-1)
@@ -378,7 +401,13 @@ def run_experiment() -> dict[str, float]:
             break
 
         model.load_state_dict(model_best_state)
-        labels, probabilities, _ = predict_probabilities(model, valid_loader, loss_function, device)
+        labels, probabilities, _ = predict_probabilities(
+            model,
+            valid_loader,
+            loss_function,
+            device,
+            tta_offsets=(-8, 0, 8),
+        )
         validation_labels = labels
         ensemble_probabilities.append(probabilities)
         probability_stack = np.stack(ensemble_probabilities, axis=0)
