@@ -180,11 +180,34 @@ def train_rhythm_model_scores(prepared) -> np.ndarray:
         return torch.sigmoid(model(valid_features)).detach().cpu().numpy().reshape(-1)
 
 
+def ecg_knn_scores(prepared) -> np.ndarray:
+    downsampled = prepared.traces[:, ::16, :].reshape(len(prepared.labels), -1).astype(np.float32)
+    downsampled = downsampled - downsampled.mean(axis=1, keepdims=True)
+    downsampled = downsampled / (downsampled.std(axis=1, keepdims=True) + 1e-6)
+
+    train_indices = np.asarray(prepared.split.train)
+    valid_indices = np.asarray(prepared.split.valid)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_features = torch.tensor(downsampled[train_indices], dtype=torch.float32, device=device)
+    valid_features = torch.tensor(downsampled[valid_indices], dtype=torch.float32, device=device)
+    train_features = nn.functional.normalize(train_features, dim=1)
+    valid_features = nn.functional.normalize(valid_features, dim=1)
+    train_labels = torch.tensor(prepared.labels[train_indices], dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        similarities = valid_features @ train_features.T
+        values, indices = torch.topk(similarities, k=80, dim=1)
+        weights = torch.softmax(values * 30.0, dim=1)
+        scores = (weights * train_labels[indices]).sum(dim=1)
+    return scores.detach().cpu().numpy()
+
+
 def make_loaders(config: TrainConfig):
     prepared = load_prepared_task(seed=DEFAULT_SEED)
     traces = torch.tensor(prepared.traces, dtype=torch.float32)
     labels = torch.tensor(prepared.labels, dtype=torch.float32).reshape(-1, 1)
     rhythm_scores = train_rhythm_model_scores(prepared)
+    knn_scores = ecg_knn_scores(prepared)
 
     train_dataset = TensorDataset(traces[prepared.split.train], labels[prepared.split.train])
     valid_dataset = TensorDataset(traces[prepared.split.valid], labels[prepared.split.valid])
@@ -196,7 +219,7 @@ def make_loaders(config: TrainConfig):
         generator=generator,
     )
     valid_loader = DataLoader(valid_dataset, batch_size=config.batch_size, shuffle=False)
-    return train_loader, valid_loader, prepared.traces.shape[-1], rhythm_scores
+    return train_loader, valid_loader, prepared.traces.shape[-1], rhythm_scores, knn_scores
 
 
 def train_epoch(model, dataloader, optimizer, loss_function, device) -> float:
@@ -309,7 +332,7 @@ def run_experiment() -> dict[str, float]:
     set_seed(DEFAULT_SEED)
     start_total = time.monotonic()
     training_start = time.monotonic()
-    train_loader, valid_loader, n_leads, rhythm_scores = make_loaders(config)
+    train_loader, valid_loader, n_leads, rhythm_scores, knn_scores = make_loaders(config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_function = nn.BCEWithLogitsLoss()
@@ -372,6 +395,15 @@ def run_experiment() -> dict[str, float]:
         if primary_metric(rhythm_metrics) > primary_metric(metrics):
             metrics = rhythm_metrics
             averaged_probabilities = rhythm_probabilities
+        knn_candidates = [knn_scores]
+        knn_candidates.extend(
+            ((1.0 - weight) * averaged_probabilities) + (weight * knn_scores)
+            for weight in (0.01, 0.02, 0.05, 0.10)
+        )
+        knn_metrics, knn_probabilities = select_best_scores(labels, knn_candidates)
+        if primary_metric(knn_metrics) > primary_metric(metrics):
+            metrics = knn_metrics
+            averaged_probabilities = knn_probabilities
         clipped_probabilities = np.clip(averaged_probabilities, 1e-7, 1.0 - 1e-7)
         metrics["valid_loss"] = float(
             -np.mean(
