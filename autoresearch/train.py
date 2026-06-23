@@ -406,7 +406,7 @@ def run_experiment() -> dict[str, float]:
             valid_loader,
             loss_function,
             device,
-            tta_offsets=(-8, 0, 8),
+            tta_offsets=(-16, -8, 0, 8, 16),
         )
         validation_labels = labels
         ensemble_probabilities.append(probabilities)
