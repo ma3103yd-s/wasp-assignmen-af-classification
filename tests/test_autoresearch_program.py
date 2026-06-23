@@ -26,6 +26,15 @@ class ProgramTests(unittest.TestCase):
         self.assertNotIn("leaderboard", autoresearch_section)
         self.assertNotIn("notebook", autoresearch_section)
 
+    def test_loop_docs_define_valid_ml_engineering_boundaries(self):
+        content = Path("autoresearch/program.md").read_text().lower()
+
+        self.assertIn("valid ml engineering rules", content)
+        self.assertIn("must not inspect validation labels", content)
+        self.assertIn("must not select thresholds", content)
+        self.assertIn("one set of validation probabilities", content)
+        self.assertIn("f1_at_0_5", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -165,8 +165,6 @@ def print_summary(metrics: dict[str, float]) -> None:
     print("---")
     for key in (
         "primary_metric",
-        "best_f1",
-        "best_threshold",
         "f1_at_0_5",
         "auroc",
         "average_precision",

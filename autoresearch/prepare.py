@@ -131,18 +131,6 @@ def _f1_at_threshold(truth: np.ndarray, prob: np.ndarray, threshold: float) -> f
     return 0.0 if denominator == 0 else float((2 * tp) / denominator)
 
 
-def _best_f1_threshold(truth: np.ndarray, prob: np.ndarray) -> tuple[float, float]:
-    candidates = sorted(set(prob.tolist() + [DEFAULT_THRESHOLD]), reverse=True)
-    best_f1 = -1.0
-    best_threshold = DEFAULT_THRESHOLD
-    for threshold in candidates:
-        f1 = _f1_at_threshold(truth, prob, threshold)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_threshold = float(threshold)
-    return best_f1, best_threshold
-
-
 def classification_metrics(
     y_true: Sequence[float],
     y_prob: Sequence[float],
@@ -171,18 +159,16 @@ def classification_metrics(
     pred_at_threshold = (prob >= threshold).astype(np.float64)
     tn = float(np.sum((pred_at_threshold == 0) & (truth == 0)))
     tp = float(np.sum((pred_at_threshold == 1) & (truth == 1)))
-    best_f1, best_threshold = _best_f1_threshold(truth, prob)
+    f1_at_threshold = _f1_at_threshold(truth, prob, threshold)
 
     return {
         "auroc": float(auroc),
         "average_precision": float(average_precision),
-        "f1_at_0_5": _f1_at_threshold(truth, prob, threshold),
-        "best_f1": float(best_f1),
-        "best_threshold": float(best_threshold),
+        "f1_at_0_5": f1_at_threshold,
         "accuracy": float((tp + tn) / len(truth)),
     }
 
 
 def primary_metric(metrics: Dict[str, float]) -> float:
     """Return the metric used for AutoResearch keep/discard decisions."""
-    return metrics["best_f1"]
+    return metrics["f1_at_0_5"]

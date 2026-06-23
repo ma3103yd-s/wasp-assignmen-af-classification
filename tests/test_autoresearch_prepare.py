@@ -33,18 +33,9 @@ class PrepareTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["auroc"], 0.75)
         self.assertAlmostEqual(metrics["average_precision"], 5 / 6)
         self.assertAlmostEqual(metrics["f1_at_0_5"], 2 / 3)
-        self.assertAlmostEqual(metrics["best_f1"], 0.8)
-        self.assertAlmostEqual(metrics["best_threshold"], 0.35)
-        self.assertEqual(primary_metric(metrics), metrics["best_f1"])
-
-    def test_best_f1_threshold_tie_prefers_higher_threshold(self):
-        y_true = np.array([0, 1, 0, 1])
-        y_prob = np.array([0.2, 0.6, 0.6, 0.8])
-
-        metrics = classification_metrics(y_true, y_prob)
-
-        self.assertAlmostEqual(metrics["best_f1"], 0.8)
-        self.assertAlmostEqual(metrics["best_threshold"], 0.6)
+        self.assertNotIn("best_f1", metrics)
+        self.assertNotIn("best_threshold", metrics)
+        self.assertEqual(primary_metric(metrics), metrics["f1_at_0_5"])
 
     def test_load_prepared_task_reorders_labels_to_records_file(self):
         try:

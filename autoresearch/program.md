@@ -30,9 +30,25 @@ You launch it simply as:
 - Change the validation split, benchmark definition, label alignment, reward function, or scoring rule.
 - Add new dependencies beyond the declared environment.
 
-**The goal is simple: get the best `best validation F1` (higher is better).** Since the budget is fixed, every keep/discard decision must be based on that fixed primary metric. AUROC, average precision, validation loss, training time, and GPU/CPU usage can act as secondary diagnostics.
+**The goal is simple: get the best `f1_at_0_5` (higher is better).** The final external evaluation is F1-oriented, so F1 is the single primary keep/discard metric. Since the budget is fixed, every keep/discard decision must be based on that fixed primary metric. AUROC, average precision, validation loss, training time, and GPU/CPU usage can act as secondary diagnostics.
 
-The fixed evaluator also reports the validation threshold that produced the best F1. Use that threshold as a calibration signal for future experiments, but do not change the validation split or scoring code to chase one run.
+A valid experiment produces one set of validation probabilities per run. The fixed evaluator computes the score once. The validation set is for scoring an experiment, not for fitting decisions inside the experiment.
+
+## Valid ML Engineering Rules
+
+Valid changes:
+- model architecture
+- optimizer, learning rate, schedule, weight decay
+- loss weighting or sampling based only on training labels
+- training-time augmentation
+- fixed inference transforms chosen before seeing validation results
+
+Invalid changes:
+- `train.py` must not inspect validation labels except through the final fixed score printed by the run.
+- `train.py` must not select thresholds, ensemble members, blend weights, subsets, or post-processing choices by repeatedly scoring candidates on validation labels.
+- `train.py` must not train auxiliary models on validation labels.
+- `train.py` must not read record ids, filenames, row ordering, or metadata as a proxy for labels.
+- `train.py` must not read data outside the fixed prepared inputs used by the data-loading path.
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome.
 
@@ -43,9 +59,7 @@ Once the script finishes it should print a grep-friendly summary such as:
 
 ```text
 ---
-primary_metric: <best_validation_f1>
-best_f1: <value>
-best_threshold: <value>
+primary_metric: <fixed_validation_f1>
 f1_at_0_5: <value>
 auroc: <value>
 average_precision: <value>
@@ -77,7 +91,7 @@ LOOP FOREVER:
 2. Tune `autoresearch/train.py` with an experimental idea by directly hacking the code.
 3. `git commit`
 4. Run the experiment: `python autoresearch/train.py > autoresearch/run.log 2>&1` (redirect everything - do not use tee or let output flood your context).
-5. Read out the results: `grep -E 'primary_metric|best_f1|best_threshold|f1_at_0_5|auroc|average_precision|training_seconds|peak_resource' autoresearch/run.log`
+5. Read out the results: `grep -E 'primary_metric|f1_at_0_5|auroc|average_precision|training_seconds|peak_resource' autoresearch/run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 autoresearch/run.log` to read the stack trace and attempt a fix. If you cannot get things to work after more than a few attempts, give up.
 7. Record the results in the TSV. Do not commit `autoresearch/results.tsv`; leave it untracked by git unless the user explicitly wants otherwise.
 8. If the primary metric improved in the desired direction, you "advance" the branch, keeping the git commit.
