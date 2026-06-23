@@ -25,6 +25,9 @@ class TrainConfig:
     noise_std: float = 0.02
     scale_std: float = 0.08
     lead_dropout: float = 0.04
+    calibration_bias_min: float = -2.0
+    calibration_bias_max: float = 2.0
+    calibration_bias_steps: int = 81
     model_path: Path = Path("autoresearch/model.pth")
 
 
@@ -131,7 +134,7 @@ class ECGConvNet(nn.Module):
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(p=0.25),
+            nn.Dropout(p=0.1),
             nn.Linear(512, 1),
         )
 
@@ -234,29 +237,50 @@ def train_epoch(model, dataloader, optimizer, scheduler, loss_function, device, 
     return total_loss / max(1, n_entries)
 
 
-def evaluate_model(model, dataloader, loss_function, device):
+def predict_logits(model, dataloader, device):
     model.eval()
-    total_loss = 0.0
-    n_entries = 0
-    all_probabilities = []
+    all_logits = []
     all_labels = []
     with torch.no_grad():
         for traces, labels in dataloader:
             traces = traces.to(device)
-            labels = labels.to(device)
             logits = model(traces)
-            loss = loss_function(logits, labels)
-
-            batch_size = len(traces)
-            total_loss += float(loss.detach().cpu()) * batch_size
-            n_entries += batch_size
-            all_probabilities.append(torch.sigmoid(logits).detach().cpu().numpy())
+            all_logits.append(logits.detach().cpu().numpy())
             all_labels.append(labels.detach().cpu().numpy())
 
-    probabilities = np.concatenate(all_probabilities).reshape(-1)
+    logits = np.concatenate(all_logits).reshape(-1)
     labels = np.concatenate(all_labels).reshape(-1)
+    return labels, logits
+
+
+def choose_logit_bias(labels: np.ndarray, logits: np.ndarray, config: TrainConfig) -> float:
+    best_bias = 0.0
+    best_metric = -1.0
+    for bias in np.linspace(
+        config.calibration_bias_min,
+        config.calibration_bias_max,
+        config.calibration_bias_steps,
+    ):
+        probabilities = 1.0 / (1.0 + np.exp(-(logits + bias)))
+        metric = primary_metric(classification_metrics(labels, probabilities))
+        if metric > best_metric or (metric == best_metric and abs(bias) < abs(best_bias)):
+            best_metric = metric
+            best_bias = float(bias)
+    return best_bias
+
+
+def evaluate_model(model, dataloader, loss_function, device, logit_bias: float):
+    labels, logits = predict_logits(model, dataloader, device)
+    logits = logits + logit_bias
+    probabilities = 1.0 / (1.0 + np.exp(-logits))
     metrics = classification_metrics(labels, probabilities)
-    metrics["valid_loss"] = total_loss / max(1, n_entries)
+    metrics["valid_loss"] = float(
+        loss_function(
+            torch.tensor(logits, dtype=torch.float32, device=device).reshape(-1, 1),
+            torch.tensor(labels, dtype=torch.float32, device=device).reshape(-1, 1),
+        ).detach()
+    )
+    metrics["logit_bias"] = logit_bias
     return metrics
 
 
@@ -311,7 +335,9 @@ def run_experiment() -> dict[str, float]:
     config.model_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"model": model.state_dict()}, config.model_path)
 
-    metrics = evaluate_model(model, valid_loader, loss_function, device)
+    train_labels, train_logits = predict_logits(model, train_loader, device)
+    logit_bias = choose_logit_bias(train_labels, train_logits, config)
+    metrics = evaluate_model(model, valid_loader, loss_function, device, logit_bias)
     metrics["train_loss"] = train_loss
     metrics["epoch"] = float(completed_epochs)
     metrics["training_seconds"] = time.monotonic() - training_start
@@ -332,6 +358,7 @@ def print_summary(metrics: dict[str, float]) -> None:
         "valid_loss",
         "train_loss",
         "epoch",
+        "logit_bias",
         "training_seconds",
         "total_seconds",
         "peak_resource",
