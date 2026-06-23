@@ -165,7 +165,9 @@ def make_loaders(config: TrainConfig):
     train_traces = prepared.traces[train_indices]
     lead_mean = train_traces.mean(axis=(0, 1), keepdims=True)
     lead_std = train_traces.std(axis=(0, 1), keepdims=True)
-    traces = (prepared.traces - lead_mean) / np.maximum(lead_std, 1e-6)
+    normalized_traces = (prepared.traces - lead_mean) / np.maximum(lead_std, 1e-6)
+    trace_deltas = np.diff(normalized_traces, axis=1, prepend=normalized_traces[:, :1, :])
+    traces = np.concatenate((normalized_traces, trace_deltas), axis=2)
     traces = torch.tensor(traces, dtype=torch.float32)
     labels = torch.tensor(prepared.labels, dtype=torch.float32).reshape(-1, 1)
 
