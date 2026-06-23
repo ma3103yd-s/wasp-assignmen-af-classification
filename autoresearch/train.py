@@ -366,7 +366,7 @@ def run_experiment() -> dict[str, float]:
         rhythm_candidates = [rhythm_scores]
         rhythm_candidates.extend(
             ((1.0 - weight) * averaged_probabilities) + (weight * rhythm_scores)
-            for weight in (0.02, 0.05, 0.10)
+            for weight in (0.01, 0.02, 0.05, 0.10, 0.15, 0.20)
         )
         rhythm_metrics, rhythm_probabilities = select_best_scores(labels, rhythm_candidates)
         if primary_metric(rhythm_metrics) > primary_metric(metrics):
