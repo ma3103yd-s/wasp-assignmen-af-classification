@@ -215,6 +215,11 @@ def run_experiment() -> dict[str, float]:
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
         )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config.num_epochs,
+            eta_min=config.learning_rate * 0.02,
+        )
 
         model_best_metrics = None
         model_best_state = None
@@ -225,6 +230,7 @@ def run_experiment() -> dict[str, float]:
 
             train_loss = train_epoch(model, train_loader, optimizer, loss_function, device)
             metrics = evaluate_model(model, valid_loader, loss_function, device)
+            scheduler.step()
             metrics["train_loss"] = train_loss
             metrics["epoch"] = float(epoch)
 
