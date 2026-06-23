@@ -68,6 +68,48 @@ class ResidualBlock(nn.Module):
         return self.activation(residual + self.shortcut(traces))
 
 
+class InceptionBlock(nn.Module):
+    def __init__(self, in_channels: int, branch_channels: int, bottleneck_channels: int = 32):
+        super().__init__()
+        if in_channels > bottleneck_channels:
+            self.bottleneck = nn.Sequential(
+                nn.Conv1d(in_channels, bottleneck_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(8, bottleneck_channels),
+                nn.SiLU(),
+            )
+            conv_channels = bottleneck_channels
+        else:
+            self.bottleneck = nn.Identity()
+            conv_channels = in_channels
+
+        self.branches = nn.ModuleList(
+            [
+                nn.Conv1d(conv_channels, branch_channels, kernel_size=9, padding=4, bias=False),
+                nn.Conv1d(conv_channels, branch_channels, kernel_size=19, padding=9, bias=False),
+                nn.Conv1d(conv_channels, branch_channels, kernel_size=39, padding=19, bias=False),
+            ]
+        )
+        self.pool_branch = nn.Sequential(
+            nn.MaxPool1d(kernel_size=3, stride=1, padding=1),
+            nn.Conv1d(in_channels, branch_channels, kernel_size=1, bias=False),
+        )
+        out_channels = branch_channels * 4
+        self.norm = nn.GroupNorm(8, out_channels)
+        self.shortcut = (
+            nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+        self.activation = nn.SiLU()
+
+    def forward(self, traces: torch.Tensor) -> torch.Tensor:
+        reduced = self.bottleneck(traces)
+        features = [branch(reduced) for branch in self.branches]
+        features.append(self.pool_branch(traces))
+        merged = self.norm(torch.cat(features, dim=1))
+        return self.activation(merged + self.shortcut(traces))
+
+
 class ECGConvNet(nn.Module):
     def __init__(self, n_leads: int = 8):
         super().__init__()
@@ -78,17 +120,19 @@ class ECGConvNet(nn.Module):
             nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
         )
         self.features = nn.Sequential(
-            ResidualBlock(32, 32),
-            ResidualBlock(32, 64, stride=2),
-            ResidualBlock(64, 64),
-            ResidualBlock(64, 128, stride=2),
-            ResidualBlock(128, 128),
-            ResidualBlock(128, 192, stride=2),
+            InceptionBlock(32, 32),
+            InceptionBlock(128, 32),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            InceptionBlock(128, 48),
+            InceptionBlock(192, 48),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            InceptionBlock(192, 64),
+            InceptionBlock(256, 64),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Dropout(p=0.25),
-            nn.Linear(384, 1),
+            nn.Linear(512, 1),
         )
 
     def forward(self, traces: torch.Tensor) -> torch.Tensor:
