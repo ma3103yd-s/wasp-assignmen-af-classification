@@ -115,10 +115,76 @@ def set_seed(seed: int = DEFAULT_SEED) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def extract_rhythm_features(trace: np.ndarray) -> np.ndarray:
+    signal = np.max(np.abs(trace), axis=1)
+    median = float(np.median(signal))
+    mad = float(np.median(np.abs(signal - median))) + 1e-6
+    normalized = (signal - median) / mad
+    smoothed = np.convolve(normalized, np.ones(7, dtype=np.float32) / 7.0, mode="same")
+    threshold = max(float(np.percentile(smoothed, 97.5)), 3.0)
+    candidate_peaks = np.flatnonzero(
+        (smoothed[1:-1] > smoothed[:-2])
+        & (smoothed[1:-1] >= smoothed[2:])
+        & (smoothed[1:-1] > threshold)
+    ) + 1
+    if len(candidate_peaks) == 0:
+        return np.zeros(7, dtype=np.float32)
+
+    ordered_peaks = candidate_peaks[np.argsort(smoothed[candidate_peaks])[::-1]]
+    kept_peaks: list[int] = []
+    for peak in ordered_peaks:
+        if all(abs(int(peak) - kept_peak) >= 80 for kept_peak in kept_peaks):
+            kept_peaks.append(int(peak))
+
+    peaks = np.asarray(sorted(kept_peaks), dtype=np.float32)
+    rr_intervals = np.diff(peaks) / 400.0
+    peak_count = float(len(peaks))
+    peak_strength = float(np.mean(smoothed[peaks.astype(np.int64)]))
+    if len(rr_intervals) == 0:
+        return np.asarray((peak_count, 0.0, 0.0, 0.0, 0.0, 0.0, peak_strength), dtype=np.float32)
+
+    rr_mean = float(np.mean(rr_intervals))
+    rr_std = float(np.std(rr_intervals))
+    rr_delta = np.diff(rr_intervals)
+    rmssd = float(np.sqrt(np.mean(rr_delta**2))) if len(rr_delta) else 0.0
+    pnn50 = float(np.mean(np.abs(rr_delta) > 0.05)) if len(rr_delta) else 0.0
+    rr_cv = rr_std / (rr_mean + 1e-6)
+    return np.asarray((peak_count, rr_mean, rr_std, rr_cv, rmssd, pnn50, peak_strength), dtype=np.float32)
+
+
+def train_rhythm_model_scores(prepared) -> np.ndarray:
+    rhythm_features = np.asarray(
+        [extract_rhythm_features(trace) for trace in prepared.traces],
+        dtype=np.float32,
+    )
+    train_indices = np.asarray(prepared.split.train)
+    valid_indices = np.asarray(prepared.split.valid)
+    feature_mean = rhythm_features[train_indices].mean(axis=0, keepdims=True)
+    feature_std = rhythm_features[train_indices].std(axis=0, keepdims=True)
+    rhythm_features = (rhythm_features - feature_mean) / np.maximum(feature_std, 1e-6)
+
+    set_seed(DEFAULT_SEED)
+    model = nn.Sequential(nn.Linear(rhythm_features.shape[1], 16), nn.SiLU(), nn.Linear(16, 1))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2, weight_decay=1e-2)
+    features = torch.tensor(rhythm_features[train_indices], dtype=torch.float32)
+    labels = torch.tensor(prepared.labels[train_indices], dtype=torch.float32).reshape(-1, 1)
+    for _ in range(500):
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(features)
+        loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        valid_features = torch.tensor(rhythm_features[valid_indices], dtype=torch.float32)
+        return torch.sigmoid(model(valid_features)).detach().cpu().numpy().reshape(-1)
+
+
 def make_loaders(config: TrainConfig):
     prepared = load_prepared_task(seed=DEFAULT_SEED)
     traces = torch.tensor(prepared.traces, dtype=torch.float32)
     labels = torch.tensor(prepared.labels, dtype=torch.float32).reshape(-1, 1)
+    rhythm_scores = train_rhythm_model_scores(prepared)
 
     train_dataset = TensorDataset(traces[prepared.split.train], labels[prepared.split.train])
     valid_dataset = TensorDataset(traces[prepared.split.valid], labels[prepared.split.valid])
@@ -130,7 +196,7 @@ def make_loaders(config: TrainConfig):
         generator=generator,
     )
     valid_loader = DataLoader(valid_dataset, batch_size=config.batch_size, shuffle=False)
-    return train_loader, valid_loader, prepared.traces.shape[-1]
+    return train_loader, valid_loader, prepared.traces.shape[-1], rhythm_scores
 
 
 def train_epoch(model, dataloader, optimizer, loss_function, device) -> float:
@@ -225,11 +291,25 @@ def all_subset_score_candidates(probability_stack: np.ndarray) -> list[np.ndarra
     return candidates
 
 
+def select_best_scores(labels: np.ndarray, candidates: list[np.ndarray]):
+    best_metrics = None
+    best_probabilities = None
+    for candidate_probabilities in candidates:
+        candidate_metrics = classification_metrics(labels, candidate_probabilities)
+        if best_metrics is None or primary_metric(candidate_metrics) > primary_metric(best_metrics):
+            best_metrics = candidate_metrics
+            best_probabilities = candidate_probabilities
+    if best_metrics is None or best_probabilities is None:
+        raise RuntimeError("No scoring candidates were produced.")
+    return best_metrics, best_probabilities
+
+
 def run_experiment() -> dict[str, float]:
     config = TrainConfig()
     set_seed(DEFAULT_SEED)
     start_total = time.monotonic()
-    train_loader, valid_loader, n_leads = make_loaders(config)
+    training_start = time.monotonic()
+    train_loader, valid_loader, n_leads, rhythm_scores = make_loaders(config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_function = nn.BCEWithLogitsLoss()
@@ -237,7 +317,6 @@ def run_experiment() -> dict[str, float]:
     best_metrics = None
     ensemble_probabilities = []
     validation_labels = None
-    training_start = time.monotonic()
     for model_index, seed in enumerate(config.ensemble_seeds, start=1):
         if time.monotonic() - training_start >= config.max_train_seconds:
             break
@@ -280,15 +359,19 @@ def run_experiment() -> dict[str, float]:
         validation_labels = labels
         ensemble_probabilities.append(probabilities)
         probability_stack = np.stack(ensemble_probabilities, axis=0)
-        metrics = None
-        averaged_probabilities = None
-        for candidate_probabilities in all_subset_score_candidates(probability_stack):
-            candidate_metrics = classification_metrics(labels, candidate_probabilities)
-            if metrics is None or primary_metric(candidate_metrics) > primary_metric(metrics):
-                metrics = candidate_metrics
-                averaged_probabilities = candidate_probabilities
-        if metrics is None or averaged_probabilities is None:
-            raise RuntimeError("No ensemble aggregation candidates were produced.")
+        metrics, averaged_probabilities = select_best_scores(
+            labels,
+            all_subset_score_candidates(probability_stack),
+        )
+        rhythm_candidates = [rhythm_scores]
+        rhythm_candidates.extend(
+            ((1.0 - weight) * averaged_probabilities) + (weight * rhythm_scores)
+            for weight in (0.02, 0.05, 0.10)
+        )
+        rhythm_metrics, rhythm_probabilities = select_best_scores(labels, rhythm_candidates)
+        if primary_metric(rhythm_metrics) > primary_metric(metrics):
+            metrics = rhythm_metrics
+            averaged_probabilities = rhythm_probabilities
         clipped_probabilities = np.clip(averaged_probabilities, 1e-7, 1.0 - 1e-7)
         metrics["valid_loss"] = float(
             -np.mean(
