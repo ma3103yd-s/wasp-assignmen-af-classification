@@ -49,6 +49,14 @@ class ResidualBlock(nn.Module):
             ),
             nn.GroupNorm(8, out_channels),
         )
+        squeeze_channels = max(8, out_channels // 8)
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(out_channels, squeeze_channels, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv1d(squeeze_channels, out_channels, kernel_size=1),
+            nn.Sigmoid(),
+        )
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
@@ -59,7 +67,9 @@ class ResidualBlock(nn.Module):
         self.activation = nn.SiLU()
 
     def forward(self, traces: torch.Tensor) -> torch.Tensor:
-        return self.activation(self.net(traces) + self.shortcut(traces))
+        residual = self.net(traces)
+        residual = residual * self.channel_attention(residual)
+        return self.activation(residual + self.shortcut(traces))
 
 
 class ECGConvNet(nn.Module):
