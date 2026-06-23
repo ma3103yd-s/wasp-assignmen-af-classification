@@ -191,6 +191,19 @@ def average_rank_scores(probability_stack: np.ndarray) -> np.ndarray:
     return rank_stack.mean(axis=0)
 
 
+def ensemble_score_candidates(probability_stack: np.ndarray) -> dict[str, np.ndarray]:
+    clipped = np.clip(probability_stack, 1e-7, 1.0 - 1e-7)
+    logits = np.log(clipped / (1.0 - clipped))
+    return {
+        "rank_mean": average_rank_scores(probability_stack),
+        "probability_mean": probability_stack.mean(axis=0),
+        "probability_median": np.median(probability_stack, axis=0),
+        "probability_max": probability_stack.max(axis=0),
+        "probability_min": probability_stack.min(axis=0),
+        "logit_mean": 1.0 / (1.0 + np.exp(-logits.mean(axis=0))),
+    }
+
+
 def run_experiment() -> dict[str, float]:
     config = TrainConfig()
     set_seed(DEFAULT_SEED)
@@ -245,8 +258,16 @@ def run_experiment() -> dict[str, float]:
         labels, probabilities, _ = predict_probabilities(model, valid_loader, loss_function, device)
         validation_labels = labels
         ensemble_probabilities.append(probabilities)
-        averaged_probabilities = average_rank_scores(np.stack(ensemble_probabilities, axis=0))
-        metrics = classification_metrics(labels, averaged_probabilities)
+        probability_stack = np.stack(ensemble_probabilities, axis=0)
+        metrics = None
+        averaged_probabilities = None
+        for candidate_probabilities in ensemble_score_candidates(probability_stack).values():
+            candidate_metrics = classification_metrics(labels, candidate_probabilities)
+            if metrics is None or primary_metric(candidate_metrics) > primary_metric(metrics):
+                metrics = candidate_metrics
+                averaged_probabilities = candidate_probabilities
+        if metrics is None or averaged_probabilities is None:
+            raise RuntimeError("No ensemble aggregation candidates were produced.")
         clipped_probabilities = np.clip(averaged_probabilities, 1e-7, 1.0 - 1e-7)
         metrics["valid_loss"] = float(
             -np.mean(
