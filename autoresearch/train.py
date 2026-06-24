@@ -28,6 +28,9 @@ class TrainConfig:
     calibration_bias_min: float = -2.0
     calibration_bias_max: float = 2.0
     calibration_bias_steps: int = 81
+    calibration_scale_min: float = 0.75
+    calibration_scale_max: float = 1.25
+    calibration_scale_steps: int = 21
     model_path: Path = Path("autoresearch/model.pth")
 
 
@@ -257,25 +260,36 @@ def predict_logits(model, dataloader, device):
     return labels, logits
 
 
-def choose_logit_bias(labels: np.ndarray, logits: np.ndarray, config: TrainConfig) -> float:
+def choose_logit_transform(labels: np.ndarray, logits: np.ndarray, config: TrainConfig) -> tuple[float, float]:
+    best_scale = 1.0
     best_bias = 0.0
     best_metric = -1.0
-    for bias in np.linspace(
-        config.calibration_bias_min,
-        config.calibration_bias_max,
-        config.calibration_bias_steps,
+    for scale in np.linspace(
+        config.calibration_scale_min,
+        config.calibration_scale_max,
+        config.calibration_scale_steps,
     ):
-        probabilities = 1.0 / (1.0 + np.exp(-(logits + bias)))
-        metric = primary_metric(classification_metrics(labels, probabilities))
-        if metric > best_metric or (metric == best_metric and abs(bias) < abs(best_bias)):
-            best_metric = metric
-            best_bias = float(bias)
-    return best_bias
+        scaled_logits = logits * scale
+        for bias in np.linspace(
+            config.calibration_bias_min,
+            config.calibration_bias_max,
+            config.calibration_bias_steps,
+        ):
+            probabilities = 1.0 / (1.0 + np.exp(-(scaled_logits + bias)))
+            metric = primary_metric(classification_metrics(labels, probabilities))
+            if metric > best_metric or (
+                metric == best_metric
+                and (abs(scale - 1.0), abs(bias)) < (abs(best_scale - 1.0), abs(best_bias))
+            ):
+                best_metric = metric
+                best_scale = float(scale)
+                best_bias = float(bias)
+    return best_scale, best_bias
 
 
-def evaluate_model(model, dataloader, loss_function, device, logit_bias: float):
+def evaluate_model(model, dataloader, loss_function, device, logit_scale: float, logit_bias: float):
     labels, logits = predict_logits(model, dataloader, device)
-    logits = logits + logit_bias
+    logits = (logits * logit_scale) + logit_bias
     probabilities = 1.0 / (1.0 + np.exp(-logits))
     metrics = classification_metrics(labels, probabilities)
     metrics["valid_loss"] = float(
@@ -284,6 +298,7 @@ def evaluate_model(model, dataloader, loss_function, device, logit_bias: float):
             torch.tensor(labels, dtype=torch.float32, device=device).reshape(-1, 1),
         ).detach()
     )
+    metrics["logit_scale"] = logit_scale
     metrics["logit_bias"] = logit_bias
     return metrics
 
@@ -340,8 +355,8 @@ def run_experiment() -> dict[str, float]:
     torch.save({"model": model.state_dict()}, config.model_path)
 
     train_labels, train_logits = predict_logits(model, train_loader, device)
-    logit_bias = choose_logit_bias(train_labels, train_logits, config)
-    metrics = evaluate_model(model, valid_loader, loss_function, device, logit_bias)
+    logit_scale, logit_bias = choose_logit_transform(train_labels, train_logits, config)
+    metrics = evaluate_model(model, valid_loader, loss_function, device, logit_scale, logit_bias)
     metrics["train_loss"] = train_loss
     metrics["epoch"] = float(completed_epochs)
     metrics["training_seconds"] = time.monotonic() - training_start
@@ -362,6 +377,7 @@ def print_summary(metrics: dict[str, float]) -> None:
         "valid_loss",
         "train_loss",
         "epoch",
+        "logit_scale",
         "logit_bias",
         "training_seconds",
         "total_seconds",
