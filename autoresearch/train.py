@@ -206,8 +206,10 @@ def augment_traces(traces: torch.Tensor, config: TrainConfig) -> torch.Tensor:
         traces = traces * scale
 
     if config.lead_dropout > 0:
-        keep = torch.rand(len(traces), 1, traces.shape[-1], device=traces.device)
+        midpoint = traces.shape[-1] // 2
+        keep = torch.rand(len(traces), 1, midpoint, device=traces.device)
         keep = (keep > config.lead_dropout).to(traces.dtype)
+        keep = torch.cat((keep, keep), dim=2)
         traces = traces * keep
 
     if config.noise_std > 0:
