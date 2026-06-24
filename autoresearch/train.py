@@ -21,7 +21,7 @@ class TrainConfig:
     weight_decay: float = 1e-4
     num_epochs: int = 15
     max_train_seconds: float = 300.0
-    max_time_shift: int = 48
+    max_time_shift: int = 47
     noise_std: float = 0.025
     scale_std: float = 0.08
     lead_dropout: float = 0.04
