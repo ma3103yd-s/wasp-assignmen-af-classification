@@ -17,7 +17,7 @@ from prepare import DEFAULT_SEED, classification_metrics, load_prepared_task, pr
 @dataclass(frozen=True)
 class TrainConfig:
     batch_size: int = 64
-    learning_rate: float = 2e-3
+    learning_rate: float = 2.5e-3
     weight_decay: float = 1e-4
     num_epochs: int = 15
     max_train_seconds: float = 300.0
