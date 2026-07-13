@@ -56,7 +56,10 @@ import json
 import unittest
 from pathlib import Path
 
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +116,7 @@ class ECGNotebookStaticTests(unittest.TestCase):
                 "exec",
             )
 
+    @unittest.skipIf(torch is None, "PyTorch is not installed in the local test environment")
     def test_model_preserves_input_and_output_shape_contract(self):
         namespace = {
             "torch": torch,
@@ -169,7 +173,7 @@ Run:
 rtk python3 -m unittest tests.test_ecg_notebook_static -v
 ```
 
-Expected: the notebook structure and current model shape checks pass, while the architecture/candidate-marker test fails because the new squeeze-and-excitation/downsampling classes and candidate names do not yet exist.
+Expected: the notebook structure and code-cell syntax checks pass, the model-shape check passes when Torch is installed (or is skipped with an explicit local-environment reason), and the architecture/candidate-marker test fails because the new squeeze-and-excitation/downsampling classes and candidate names do not yet exist.
 
 - [ ] **Step 3: Check the test itself for accidental scope violations**
 
